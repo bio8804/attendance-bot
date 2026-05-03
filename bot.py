@@ -21,7 +21,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 load_dotenv()
 
-store = AttendanceStore()
+store = AttendanceStore(os.getenv("ATTENDANCE_DB_PATH", "/tmp/attendance.db"))
 
 
 def employee_name(update: Update) -> str:
