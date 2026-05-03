@@ -19,6 +19,8 @@ HEADERS = [
     "Отработано",
     "Минуты",
     "Статус",
+    "Гео приход",
+    "Гео уход",
 ]
 
 
@@ -35,12 +37,17 @@ def export_daily_report(path: str | Path, report_date: str, records: list[Attend
     title_cell.alignment = Alignment(horizontal="center")
 
     summary = build_summary(records)
-    worksheet.append(["Сотрудников", summary["employees"], "На работе", summary["inside"], "Без прихода", summary["absent"]])
+    worksheet.append(["Сотрудников", summary["employees"]])
+    worksheet.append(["На работе сейчас", summary["inside"]])
+    worksheet.append(["Без прихода", summary["absent"]])
     worksheet.append(["Итого закрытых часов", format_minutes(summary["completed_minutes"])])
     worksheet.append([])
     worksheet.append(HEADERS)
 
-    header_row = 5
+    for row_index in range(2, 6):
+        worksheet.cell(row=row_index, column=1).font = Font(bold=True)
+
+    header_row = 7
     header_fill = PatternFill("solid", fgColor="D9EAF7")
     for cell in worksheet[header_row]:
         cell.font = Font(bold=True)
@@ -59,18 +66,20 @@ def export_daily_report(path: str | Path, report_date: str, records: list[Attend
                 format_minutes(record.worked_minutes),
                 record.worked_minutes or 0,
                 record_status(record),
+                format_distance(record.check_in_distance_m),
+                format_distance(record.check_out_distance_m),
             ]
         )
 
-    for column_index, width in enumerate([6, 28, 20, 14, 12, 12, 18, 10, 16], start=1):
+    for column_index, width in enumerate([6, 28, 20, 14, 12, 12, 18, 10, 16, 14, 14], start=1):
         worksheet.column_dimensions[get_column_letter(column_index)].width = width
 
-    for row in worksheet.iter_rows(min_row=6):
+    for row in worksheet.iter_rows(min_row=8):
         for cell in row:
             cell.alignment = Alignment(vertical="center")
 
-    worksheet.freeze_panes = "A6"
-    worksheet.auto_filter.ref = f"A5:{get_column_letter(len(HEADERS))}{max(5, worksheet.max_row)}"
+    worksheet.freeze_panes = "A8"
+    worksheet.auto_filter.ref = f"A7:{get_column_letter(len(HEADERS))}{max(7, worksheet.max_row)}"
     workbook.save(output_path)
     return output_path
 
@@ -90,3 +99,7 @@ def record_status(record: AttendanceRecord) -> str:
     if record.check_out:
         return "закрыто"
     return "нет прихода"
+
+
+def format_distance(distance_m: int | None) -> str:
+    return f"{distance_m} м" if distance_m is not None else "-"

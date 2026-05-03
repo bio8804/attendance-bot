@@ -22,9 +22,11 @@
 - `/admins` - список администраторов
 - `/add_admin TELEGRAM_ID` - добавить администратора
 - `/remove_admin TELEGRAM_ID` - удалить администратора
+- `/config` - настройки бота
 - кнопки сотрудника: `Пришел`, `Ушел`, `Мой статус`
-- кнопки администратора: `Заявки`, `Сотрудники`, `Кто на работе`, `Отчет за сегодня`, `Excel отчет`, `Админы`
+- кнопки администратора: `Заявки`, `Сотрудники`, `Кто на работе`, `Отчет за сегодня`, `Excel отчет`, `Админы`, `Настройки`
 - расчет отработанного времени
+- обязательная геолокация при приходе и уходе
 
 Данные сохраняются в SQLite.
 
@@ -68,6 +70,9 @@ ADMIN_IDS=123456789,987654321
 ```env
 ATTENDANCE_DB_PATH=attendance.db
 APP_TIMEZONE=Asia/Tashkent
+OFFICE_LATITUDE=41.311081
+OFFICE_LONGITUDE=69.240562
+OFFICE_RADIUS_METERS=150
 ```
 
 ## Запуск
@@ -113,6 +118,9 @@ TELEGRAM_BOT_TOKEN=your_real_token
 ADMIN_IDS=your_telegram_id
 ATTENDANCE_DB_PATH=/tmp/attendance.db
 APP_TIMEZONE=Asia/Tashkent
+OFFICE_LATITUDE=41.311081
+OFFICE_LONGITUDE=69.240562
+OFFICE_RADIUS_METERS=150
 ```
 
 9. Запустите build/deploy.

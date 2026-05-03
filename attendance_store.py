@@ -22,6 +22,8 @@ class AttendanceRecord:
     work_date: str
     check_in: str | None
     check_out: str | None
+    check_in_distance_m: int | None = None
+    check_out_distance_m: int | None = None
 
     @property
     def is_inside(self) -> bool:
@@ -78,11 +80,18 @@ class AttendanceStore:
                     work_date TEXT NOT NULL,
                     check_in TEXT,
                     check_out TEXT,
+                    check_in_lat REAL,
+                    check_in_lon REAL,
+                    check_in_distance_m INTEGER,
+                    check_out_lat REAL,
+                    check_out_lon REAL,
+                    check_out_distance_m INTEGER,
                     FOREIGN KEY (user_id) REFERENCES employees(user_id),
                     UNIQUE (user_id, work_date)
                 )
                 """
             )
+            self.ensure_attendance_geo_columns(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS access_requests (
@@ -116,6 +125,23 @@ class AttendanceStore:
             connection.execute(
                 "ALTER TABLE employees ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"
             )
+
+    def ensure_attendance_geo_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(attendance)").fetchall()
+        }
+        geo_columns = {
+            "check_in_lat": "REAL",
+            "check_in_lon": "REAL",
+            "check_in_distance_m": "INTEGER",
+            "check_out_lat": "REAL",
+            "check_out_lon": "REAL",
+            "check_out_distance_m": "INTEGER",
+        }
+        for column_name, column_type in geo_columns.items():
+            if column_name not in columns:
+                connection.execute(f"ALTER TABLE attendance ADD COLUMN {column_name} {column_type}")
 
     def register_employee(self, user_id: int, full_name: str, username: str | None) -> None:
         with self.connect() as connection:
@@ -293,7 +319,15 @@ class AttendanceStore:
                 """
             ).fetchall()
 
-    def check_in(self, user_id: int, full_name: str, username: str | None) -> AttendanceRecord:
+    def check_in(
+        self,
+        user_id: int,
+        full_name: str,
+        username: str | None,
+        latitude: float,
+        longitude: float,
+        distance_m: int,
+    ) -> AttendanceRecord:
         self.register_employee(user_id, full_name, username)
         work_date = today()
         now_time = current_time()
@@ -301,18 +335,34 @@ class AttendanceStore:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO attendance (user_id, work_date, check_in)
-                VALUES (?, ?, ?)
+                INSERT INTO attendance (
+                    user_id, work_date, check_in, check_in_lat, check_in_lon, check_in_distance_m
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, work_date) DO UPDATE SET
                     check_in = excluded.check_in,
-                    check_out = NULL
+                    check_out = NULL,
+                    check_in_lat = excluded.check_in_lat,
+                    check_in_lon = excluded.check_in_lon,
+                    check_in_distance_m = excluded.check_in_distance_m,
+                    check_out_lat = NULL,
+                    check_out_lon = NULL,
+                    check_out_distance_m = NULL
                 """,
-                (user_id, work_date, now_time),
+                (user_id, work_date, now_time, latitude, longitude, distance_m),
             )
 
         return self.get_record(user_id, work_date)
 
-    def check_out(self, user_id: int, full_name: str, username: str | None) -> AttendanceRecord:
+    def check_out(
+        self,
+        user_id: int,
+        full_name: str,
+        username: str | None,
+        latitude: float,
+        longitude: float,
+        distance_m: int,
+    ) -> AttendanceRecord:
         self.register_employee(user_id, full_name, username)
         work_date = today()
         now_time = current_time()
@@ -320,12 +370,17 @@ class AttendanceStore:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO attendance (user_id, work_date, check_out)
-                VALUES (?, ?, ?)
+                INSERT INTO attendance (
+                    user_id, work_date, check_out, check_out_lat, check_out_lon, check_out_distance_m
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, work_date) DO UPDATE SET
-                    check_out = excluded.check_out
+                    check_out = excluded.check_out,
+                    check_out_lat = excluded.check_out_lat,
+                    check_out_lon = excluded.check_out_lon,
+                    check_out_distance_m = excluded.check_out_distance_m
                 """,
-                (user_id, work_date, now_time),
+                (user_id, work_date, now_time, latitude, longitude, distance_m),
             )
 
         return self.get_record(user_id, work_date)
@@ -341,7 +396,9 @@ class AttendanceStore:
                     employees.username,
                     attendance.work_date,
                     attendance.check_in,
-                    attendance.check_out
+                    attendance.check_out,
+                    attendance.check_in_distance_m,
+                    attendance.check_out_distance_m
                 FROM employees
                 LEFT JOIN attendance
                     ON employees.user_id = attendance.user_id
@@ -361,6 +418,8 @@ class AttendanceStore:
             work_date=row["work_date"] or requested_date,
             check_in=row["check_in"],
             check_out=row["check_out"],
+            check_in_distance_m=row["check_in_distance_m"],
+            check_out_distance_m=row["check_out_distance_m"],
         )
 
     def daily_report(self, work_date: str | None = None) -> list[AttendanceRecord]:
@@ -374,7 +433,9 @@ class AttendanceStore:
                     employees.username,
                     ? AS work_date,
                     attendance.check_in,
-                    attendance.check_out
+                    attendance.check_out,
+                    attendance.check_in_distance_m,
+                    attendance.check_out_distance_m
                 FROM employees
                 LEFT JOIN attendance
                     ON employees.user_id = attendance.user_id
@@ -394,6 +455,8 @@ class AttendanceStore:
                 work_date=row["work_date"],
                 check_in=row["check_in"],
                 check_out=row["check_out"],
+                check_in_distance_m=row["check_in_distance_m"],
+                check_out_distance_m=row["check_out_distance_m"],
             )
             for row in rows
         ]

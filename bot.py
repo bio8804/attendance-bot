@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 import os
 import asyncio
+import math
 import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -44,6 +45,8 @@ BUTTON_EXPORT = "Excel отчет"
 BUTTON_REQUESTS = "Заявки"
 BUTTON_EMPLOYEES = "Сотрудники"
 BUTTON_ADMINS = "Админы"
+BUTTON_CONFIG = "Настройки"
+BUTTON_SEND_LOCATION = "Отправить геолокацию"
 
 EMPLOYEE_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -58,11 +61,21 @@ ADMIN_KEYBOARD = ReplyKeyboardMarkup(
         [BUTTON_REQUESTS, BUTTON_EMPLOYEES],
         [BUTTON_INSIDE, BUTTON_TODAY],
         [BUTTON_EXPORT, BUTTON_ADMINS],
+        [BUTTON_CONFIG],
     ],
     resize_keyboard=True,
 )
 
+LOCATION_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton(BUTTON_SEND_LOCATION, request_location=True)]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+
 AWAITING_FULL_NAME = 1
+PENDING_ACTION = "pending_attendance_action"
+ACTION_CHECK_IN = "check_in"
+ACTION_CHECK_OUT = "check_out"
 
 
 def employee_name(update: Update) -> str:
@@ -113,6 +126,46 @@ def role_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     return ADMIN_KEYBOARD if is_admin(user_id) else EMPLOYEE_KEYBOARD
 
 
+def office_location() -> tuple[float, float, int] | None:
+    raw_latitude = os.getenv("OFFICE_LATITUDE", "").strip()
+    raw_longitude = os.getenv("OFFICE_LONGITUDE", "").strip()
+    raw_radius = os.getenv("OFFICE_RADIUS_METERS", "150").strip()
+    if not raw_latitude or not raw_longitude:
+        return None
+
+    try:
+        return float(raw_latitude), float(raw_longitude), int(raw_radius)
+    except ValueError:
+        return None
+
+
+def distance_meters(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> int:
+    earth_radius_m = 6371000
+    lat_1 = math.radians(latitude_a)
+    lat_2 = math.radians(latitude_b)
+    delta_lat = math.radians(latitude_b - latitude_a)
+    delta_lon = math.radians(longitude_b - longitude_a)
+    haversine = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat_1) * math.cos(lat_2) * math.sin(delta_lon / 2) ** 2
+    )
+    return round(earth_radius_m * 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine)))
+
+
+def office_distance(latitude: float, longitude: float) -> tuple[int, int] | None:
+    office = office_location()
+    if office is None:
+        return None
+
+    office_latitude, office_longitude, radius_m = office
+    return distance_meters(latitude, longitude, office_latitude, office_longitude), radius_m
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     del context
     user_id = employee_id(update)
@@ -125,6 +178,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/approve ID - одобрить\n"
             "/reject ID - отклонить\n"
             "/admins - список админов",
+            "/config - настройки",
             reply_markup=ADMIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -140,7 +194,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/employees - список сотрудников\n"
             "/admins - список админов\n"
             "/add_admin ID - добавить админа\n"
-            "/remove_admin ID - удалить админа",
+            "/remove_admin ID - удалить админа\n"
+            "/config - настройки",
             reply_markup=ADMIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -239,15 +294,44 @@ async def ensure_approved(update: Update) -> bool:
 
 
 async def check_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
     if not await ensure_approved(update):
         return
 
-    record = store.check_in(employee_id(update), employee_name(update), employee_username(update))
+    if office_location() is None:
+        await update.message.reply_text(
+            "Геолокация офиса не настроена. Администратор должен задать "
+            "OFFICE_LATITUDE, OFFICE_LONGITUDE и OFFICE_RADIUS_METERS.",
+            reply_markup=EMPLOYEE_KEYBOARD,
+        )
+        return
+
+    context.user_data[PENDING_ACTION] = ACTION_CHECK_IN
+    await update.message.reply_text(
+        "Для отметки прихода отправьте геолокацию с рабочего места.",
+        reply_markup=LOCATION_KEYBOARD,
+    )
+
+
+async def complete_check_in(
+    update: Update,
+    latitude: float,
+    longitude: float,
+    distance_m: int,
+) -> None:
+    record = store.check_in(
+        employee_id(update),
+        employee_name(update),
+        employee_username(update),
+        latitude,
+        longitude,
+        distance_m,
+    )
 
     if record.check_in:
         await update.message.reply_text(
-            f"Приход отмечен: {record.check_in}\nДата: {record.work_date}",
+            f"Приход отмечен: {record.check_in}\n"
+            f"Дата: {record.work_date}\n"
+            f"Расстояние до офиса: {distance_m} м",
             reply_markup=EMPLOYEE_KEYBOARD,
         )
         return
@@ -256,18 +340,87 @@ async def check_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def check_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
     if not await ensure_approved(update):
         return
 
-    record = store.check_out(employee_id(update), employee_name(update), employee_username(update))
+    if office_location() is None:
+        await update.message.reply_text(
+            "Геолокация офиса не настроена. Администратор должен задать "
+            "OFFICE_LATITUDE, OFFICE_LONGITUDE и OFFICE_RADIUS_METERS.",
+            reply_markup=EMPLOYEE_KEYBOARD,
+        )
+        return
+
+    context.user_data[PENDING_ACTION] = ACTION_CHECK_OUT
+    await update.message.reply_text(
+        "Для отметки ухода отправьте геолокацию с рабочего места.",
+        reply_markup=LOCATION_KEYBOARD,
+    )
+
+
+async def complete_check_out(
+    update: Update,
+    latitude: float,
+    longitude: float,
+    distance_m: int,
+) -> None:
+    record = store.check_out(
+        employee_id(update),
+        employee_name(update),
+        employee_username(update),
+        latitude,
+        longitude,
+        distance_m,
+    )
 
     await update.message.reply_text(
         f"Уход отмечен: {record.check_out}\n"
         f"Дата: {record.work_date}\n"
-        f"Отработано: {format_minutes(record.worked_minutes)}",
+        f"Отработано: {format_minutes(record.worked_minutes)}\n"
+        f"Расстояние до офиса: {distance_m} м",
         reply_markup=EMPLOYEE_KEYBOARD,
     )
+
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_approved(update):
+        return
+
+    location = update.message.location
+    if location is None:
+        return
+
+    action = context.user_data.get(PENDING_ACTION)
+    if action not in {ACTION_CHECK_IN, ACTION_CHECK_OUT}:
+        await update.message.reply_text(
+            "Сначала нажмите кнопку Пришел или Ушел, затем отправьте геолокацию.",
+            reply_markup=EMPLOYEE_KEYBOARD,
+        )
+        return
+
+    distance_info = office_distance(location.latitude, location.longitude)
+    if distance_info is None:
+        await update.message.reply_text(
+            "Геолокация офиса не настроена. Обратитесь к администратору.",
+            reply_markup=EMPLOYEE_KEYBOARD,
+        )
+        return
+
+    distance_m, radius_m = distance_info
+    if distance_m > radius_m:
+        await update.message.reply_text(
+            f"Вы слишком далеко от офиса: {distance_m} м. "
+            f"Разрешенный радиус: {radius_m} м.",
+            reply_markup=EMPLOYEE_KEYBOARD,
+        )
+        return
+
+    context.user_data.pop(PENDING_ACTION, None)
+    if action == ACTION_CHECK_IN:
+        await complete_check_in(update, location.latitude, location.longitude, distance_m)
+        return
+
+    await complete_check_out(update, location.latitude, location.longitude, distance_m)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -512,6 +665,30 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("Админ удален." if removed else "Админ с таким ID не найден.")
 
 
+async def config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    if not is_admin(employee_id(update)):
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    office = office_location()
+    if office is None:
+        office_text = "офис не настроен"
+    else:
+        latitude, longitude, radius_m = office
+        office_text = f"{latitude}, {longitude}, радиус {radius_m} м"
+
+    await update.message.reply_text(
+        "Настройки бота:\n"
+        f"Часовой пояс: {os.getenv('APP_TIMEZONE', 'Asia/Tashkent')}\n"
+        f"Офис: {office_text}\n"
+        f"Админов: {len(all_admin_ids())}\n"
+        f"Сотрудников: {len(store.employees())}\n"
+        "Геолокация для прихода/ухода: обязательна",
+        reply_markup=ADMIN_KEYBOARD,
+    )
+
+
 async def today_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if not can_view_report(employee_id(update)):
@@ -586,6 +763,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text == BUTTON_ADMINS:
         await admins(update, context)
         return
+    if text == BUTTON_CONFIG:
+        await config(update, context)
+        return
 
     await update.message.reply_text(
         "Я понимаю кнопки и команды меню. Также доступны /start и /myid.",
@@ -603,7 +783,9 @@ def format_record_status(record: AttendanceRecord) -> str:
         f"Приход: {check_in}\n"
         f"Уход: {check_out}\n"
         f"Отработано: {worked_time}\n"
-        f"Сейчас: {current_status}"
+        f"Сейчас: {current_status}\n"
+        f"Гео приход: {format_distance(record.check_in_distance_m)}\n"
+        f"Гео уход: {format_distance(record.check_out_distance_m)}"
     )
 
 
@@ -631,7 +813,8 @@ def format_report(report_date: str, records: list[AttendanceRecord]) -> str:
         username = f" (@{record.username})" if record.username else ""
         lines.append(
             f"{index}. {record.full_name}{username}: {check_in} - {check_out}, "
-            f"{worked_time}, {state}"
+            f"{worked_time}, {state}, гео: {format_distance(record.check_in_distance_m)} / "
+            f"{format_distance(record.check_out_distance_m)}"
         )
 
     return "\n".join(lines)
@@ -646,6 +829,10 @@ def format_inside(records: list[AttendanceRecord]) -> str:
         username = f" (@{record.username})" if record.username else ""
         lines.append(f"{index}. {record.full_name}{username}, с {record.check_in}")
     return "\n".join(lines)
+
+
+def format_distance(distance_m: int | None) -> str:
+    return f"{distance_m} м" if distance_m is not None else "-"
 
 
 def main() -> None:
@@ -683,7 +870,9 @@ def main() -> None:
     application.add_handler(CommandHandler("admins", admins))
     application.add_handler(CommandHandler("add_admin", add_admin))
     application.add_handler(CommandHandler("remove_admin", remove_admin))
+    application.add_handler(CommandHandler("config", config))
     application.add_handler(CallbackQueryHandler(approval_callback, pattern="^(approve|reject):"))
+    application.add_handler(MessageHandler(filters.LOCATION, handle_location))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Attendance bot is running")
