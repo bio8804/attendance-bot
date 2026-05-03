@@ -7,9 +7,10 @@ import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -184,6 +185,7 @@ async def receive_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"Одобрить: /approve {user_id}\n"
                 f"Отклонить: /reject {user_id}"
             ),
+            reply_markup=approval_keyboard(user_id),
         )
 
     await update.message.reply_text(
@@ -347,6 +349,48 @@ async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+
+    admin_user = query.from_user
+    if not is_admin(admin_user.id):
+        await query.answer("Эта кнопка доступна только администратору.", show_alert=True)
+        return
+
+    action, raw_user_id = query.data.split(":", 1)
+    target_user_id = int(raw_user_id)
+
+    if action == "approve":
+        request = store.approve_request(target_user_id)
+        if request is None:
+            await query.answer("Активная заявка не найдена.", show_alert=True)
+            return
+
+        await query.edit_message_text(f"Заявка одобрена: {request['requested_name']}")
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text="Ваша заявка одобрена. Теперь можно отмечать приход и уход.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        await query.answer("Сотрудник одобрен.")
+        return
+
+    if action == "reject":
+        request = store.reject_request(target_user_id)
+        if request is None:
+            await query.answer("Активная заявка не найдена.", show_alert=True)
+            return
+
+        await query.edit_message_text(f"Заявка отклонена: {request['requested_name']}")
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text="Ваша заявка на регистрацию отклонена. Для уточнения обратитесь к администратору.",
+        )
+        await query.answer("Заявка отклонена.")
+
+
 async def employees(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if not is_admin(employee_id(update)):
@@ -369,6 +413,17 @@ def all_admin_ids() -> set[int]:
     ids = set(parse_admin_ids())
     ids.update(row["user_id"] for row in store.admins())
     return ids
+
+
+def approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Одобрить", callback_data=f"approve:{user_id}"),
+                InlineKeyboardButton("Отклонить", callback_data=f"reject:{user_id}"),
+            ]
+        ]
+    )
 
 
 async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -599,6 +654,7 @@ def main() -> None:
     application.add_handler(CommandHandler("admins", admins))
     application.add_handler(CommandHandler("add_admin", add_admin))
     application.add_handler(CommandHandler("remove_admin", remove_admin))
+    application.add_handler(CallbackQueryHandler(approval_callback, pattern="^(approve|reject):"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Attendance bot is running")
