@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 import os
 import asyncio
+import tempfile
+from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from attendance_store import AttendanceRecord, AttendanceStore, is_valid_date, today
+from attendance_store import AttendanceRecord, AttendanceStore, format_minutes, is_valid_date, today
 from health_server import start_health_server
 
 
@@ -21,7 +23,23 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 load_dotenv()
 
-store = AttendanceStore(os.getenv("ATTENDANCE_DB_PATH", "/tmp/attendance.db"))
+default_db_path = Path(tempfile.gettempdir()) / "attendance.db"
+store = AttendanceStore(os.getenv("ATTENDANCE_DB_PATH", str(default_db_path)))
+
+BUTTON_IN = "Пришел"
+BUTTON_OUT = "Ушел"
+BUTTON_STATUS = "Мой статус"
+BUTTON_TODAY = "Отчет за сегодня"
+BUTTON_INSIDE = "Кто на работе"
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [BUTTON_IN, BUTTON_OUT],
+        [BUTTON_STATUS, BUTTON_TODAY],
+        [BUTTON_INSIDE],
+    ],
+    resize_keyboard=True,
+)
 
 
 def employee_name(update: Update) -> str:
@@ -66,11 +84,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.register_employee(employee_id(update), employee_name(update), employee_username(update))
     await update.message.reply_text(
         "Готово, вы зарегистрированы.\n\n"
-        "Команды:\n"
+        "Можно пользоваться кнопками ниже или командами:\n"
         "/in - отметить приход\n"
         "/out - отметить уход\n"
         "/status - текущий статус\n"
-        "/report - отчет за сегодня"
+        "/today - отчет за сегодня\n"
+        "/inside - кто сейчас на работе\n"
+        "/report YYYY-MM-DD - отчет за дату",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -80,11 +101,12 @@ async def check_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if record.check_in:
         await update.message.reply_text(
-            f"Приход отмечен: {record.check_in}\nДата: {record.work_date}"
+            f"Приход отмечен: {record.check_in}\nДата: {record.work_date}",
+            reply_markup=MAIN_KEYBOARD,
         )
         return
 
-    await update.message.reply_text("Не удалось отметить приход.")
+    await update.message.reply_text("Не удалось отметить приход.", reply_markup=MAIN_KEYBOARD)
 
 
 async def check_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -92,7 +114,10 @@ async def check_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record = store.check_out(employee_id(update), employee_name(update), employee_username(update))
 
     await update.message.reply_text(
-        f"Уход отмечен: {record.check_out}\nДата: {record.work_date}"
+        f"Уход отмечен: {record.check_out}\n"
+        f"Дата: {record.work_date}\n"
+        f"Отработано: {format_minutes(record.worked_minutes)}",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -102,7 +127,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.register_employee(user_id, employee_name(update), employee_username(update))
     record = store.get_record(user_id)
 
-    await update.message.reply_text(format_record_status(record))
+    await update.message.reply_text(format_record_status(record), reply_markup=MAIN_KEYBOARD)
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -119,16 +144,63 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
     records = store.daily_report(report_date)
-    await update.message.reply_text(format_report(report_date, records))
+    await update.message.reply_text(format_report(report_date, records), reply_markup=MAIN_KEYBOARD)
+
+
+async def today_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    if not can_view_report(employee_id(update)):
+        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    await update.message.reply_text(format_report(today(), store.daily_report()), reply_markup=MAIN_KEYBOARD)
+
+
+async def inside(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    if not can_view_report(employee_id(update)):
+        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    records = [record for record in store.daily_report() if record.is_inside]
+    await update.message.reply_text(format_inside(records), reply_markup=MAIN_KEYBOARD)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (update.message.text or "").strip()
+    if text == BUTTON_IN:
+        await check_in(update, context)
+        return
+    if text == BUTTON_OUT:
+        await check_out(update, context)
+        return
+    if text == BUTTON_STATUS:
+        await status(update, context)
+        return
+    if text == BUTTON_TODAY:
+        await today_report(update, context)
+        return
+    if text == BUTTON_INSIDE:
+        await inside(update, context)
+        return
+
+    await update.message.reply_text(
+        "Я понимаю кнопки и команды: /in, /out, /status, /today, /inside, /report.",
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 def format_record_status(record: AttendanceRecord) -> str:
     check_in = record.check_in or "не отмечен"
     check_out = record.check_out or "не отмечен"
+    worked_time = format_minutes(record.worked_minutes)
+    current_status = "на работе" if record.is_inside else "не на работе"
     return (
         f"Статус за {record.work_date}\n"
         f"Приход: {check_in}\n"
-        f"Уход: {check_out}"
+        f"Уход: {check_out}\n"
+        f"Отработано: {worked_time}\n"
+        f"Сейчас: {current_status}"
     )
 
 
@@ -136,13 +208,40 @@ def format_report(report_date: str, records: list[AttendanceRecord]) -> str:
     if not records:
         return f"Отчет за {report_date}\nСотрудников пока нет."
 
-    lines = [f"Отчет за {report_date}"]
+    completed_minutes = sum(record.worked_minutes or 0 for record in records)
+    inside_count = sum(1 for record in records if record.is_inside)
+    absent_count = sum(1 for record in records if not record.check_in)
+
+    lines = [
+        f"Отчет за {report_date}",
+        f"Сотрудников: {len(records)}",
+        f"На работе сейчас: {inside_count}",
+        f"Без отметки прихода: {absent_count}",
+        f"Итого закрытых часов: {format_minutes(completed_minutes)}",
+        "",
+    ]
     for index, record in enumerate(records, start=1):
         check_in = record.check_in or "-"
         check_out = record.check_out or "-"
+        worked_time = format_minutes(record.worked_minutes)
+        state = "на работе" if record.is_inside else "закрыто" if record.check_out else "нет прихода"
         username = f" (@{record.username})" if record.username else ""
-        lines.append(f"{index}. {record.full_name}{username}: {check_in} - {check_out}")
+        lines.append(
+            f"{index}. {record.full_name}{username}: {check_in} - {check_out}, "
+            f"{worked_time}, {state}"
+        )
 
+    return "\n".join(lines)
+
+
+def format_inside(records: list[AttendanceRecord]) -> str:
+    if not records:
+        return "Сейчас никто не отмечен как находящийся на работе."
+
+    lines = ["Сейчас на работе:"]
+    for index, record in enumerate(records, start=1):
+        username = f" (@{record.username})" if record.username else ""
+        lines.append(f"{index}. {record.full_name}{username}, с {record.check_in}")
     return "\n".join(lines)
 
 
@@ -159,7 +258,10 @@ def main() -> None:
     application.add_handler(CommandHandler("in", check_in))
     application.add_handler(CommandHandler("out", check_out))
     application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("today", today_report))
+    application.add_handler(CommandHandler("inside", inside))
     application.add_handler(CommandHandler("report", report))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Attendance bot is running")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

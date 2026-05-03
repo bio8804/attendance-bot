@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 
 DATE_FORMAT = "%Y-%m-%d"
@@ -21,10 +23,27 @@ class AttendanceRecord:
     check_in: str | None
     check_out: str | None
 
+    @property
+    def is_inside(self) -> bool:
+        return self.check_in is not None and self.check_out is None
+
+    @property
+    def worked_minutes(self) -> int | None:
+        if not self.check_in or not self.check_out:
+            return None
+
+        start = parse_time(self.check_in)
+        end = parse_time(self.check_out)
+        if end < start:
+            return None
+
+        return int((end - start).total_seconds() // 60)
+
 
 class AttendanceStore:
     def __init__(self, db_path: str | Path = "attendance.db") -> None:
         self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
 
     @contextmanager
@@ -184,11 +203,33 @@ def utc_now() -> str:
 
 
 def today() -> str:
-    return datetime.now().strftime(DATE_FORMAT)
+    return local_now().strftime(DATE_FORMAT)
 
 
 def current_time() -> str:
-    return datetime.now().strftime(TIME_FORMAT)
+    return local_now().strftime(TIME_FORMAT)
+
+
+def local_now() -> datetime:
+    timezone_name = os.getenv("APP_TIMEZONE", "Asia/Tashkent")
+    return datetime.now(ZoneInfo(timezone_name))
+
+
+def parse_time(value: str) -> datetime:
+    parsed_time = datetime.strptime(value, TIME_FORMAT).time()
+    return datetime.combine(date.today(), parsed_time)
+
+
+def format_minutes(minutes: int | None) -> str:
+    if minutes is None:
+        return "-"
+
+    hours, remainder = divmod(minutes, 60)
+    if hours and remainder:
+        return f"{hours} ч {remainder} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{remainder} мин"
 
 
 def is_valid_date(value: str) -> bool:

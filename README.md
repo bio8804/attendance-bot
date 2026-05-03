@@ -8,8 +8,12 @@
 - `/in` - отметить приход
 - `/out` - отметить уход
 - `/status` - показать текущий статус
+- `/today` - отчет за сегодня
+- `/inside` - кто сейчас на работе
 - `/report` - отчет за сегодня
 - `/report YYYY-MM-DD` - отчет за конкретную дату
+- кнопки Telegram: `Пришел`, `Ушел`, `Мой статус`, `Отчет за сегодня`, `Кто на работе`
+- расчет отработанного времени
 
 Данные сохраняются в SQLite.
 
@@ -50,6 +54,7 @@ ADMIN_IDS=123456789,987654321
 
 ```env
 ATTENDANCE_DB_PATH=attendance.db
+APP_TIMEZONE=Asia/Tashkent
 ```
 
 ## Запуск
@@ -94,6 +99,7 @@ git push -u origin main
 TELEGRAM_BOT_TOKEN=your_real_token
 ADMIN_IDS=
 ATTENDANCE_DB_PATH=/tmp/attendance.db
+APP_TIMEZONE=Asia/Tashkent
 ```
 
 9. Запустите build/deploy.
@@ -108,6 +114,7 @@ ATTENDANCE_DB_PATH=/tmp/attendance.db
 /in
 /out
 /status
+/today
 ```
 
 Администратор получает отчет:
