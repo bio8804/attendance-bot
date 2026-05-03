@@ -8,12 +8,17 @@
 - `/in` - отметить приход
 - `/out` - отметить уход
 - `/status` - показать текущий статус
+- `/myid` - показать свой Telegram ID
 - `/today` - отчет за сегодня
 - `/inside` - кто сейчас на работе
 - `/export` - Excel-отчет за сегодня
 - `/export YYYY-MM-DD` - Excel-отчет за конкретную дату
 - `/report` - отчет за сегодня
 - `/report YYYY-MM-DD` - отчет за конкретную дату
+- `/requests` - заявки на регистрацию сотрудников
+- `/approve TELEGRAM_ID` - одобрить заявку
+- `/reject TELEGRAM_ID` - отклонить заявку
+- `/employees` - список одобренных сотрудников
 - кнопки Telegram: `Пришел`, `Ушел`, `Мой статус`, `Отчет за сегодня`, `Кто на работе`
 - расчет отработанного времени
 
@@ -51,6 +56,8 @@ ADMIN_IDS=123456789,987654321
 ```
 
 Если `ADMIN_IDS` пустой, команду `/report` смогут использовать все.
+
+Для рабочего режима обязательно задайте `ADMIN_IDS`. Новый сотрудник нажимает `/start`, вводит имя и фамилию, а админ получает заявку и одобряет ее командой `/approve TELEGRAM_ID`. Узнать свой ID можно командой `/myid`.
 
 Для локального запуска на Windows можно добавить путь к базе:
 
@@ -99,7 +106,7 @@ git push -u origin main
 
 ```env
 TELEGRAM_BOT_TOKEN=your_real_token
-ADMIN_IDS=
+ADMIN_IDS=your_telegram_id
 ATTENDANCE_DB_PATH=/tmp/attendance.db
 APP_TIMEZONE=Asia/Tashkent
 ```

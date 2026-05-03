@@ -64,10 +64,12 @@ class AttendanceStore:
                     user_id INTEGER PRIMARY KEY,
                     full_name TEXT NOT NULL,
                     username TEXT,
+                    status TEXT NOT NULL DEFAULT 'approved',
                     created_at TEXT NOT NULL
                 )
                 """
             )
+            self.ensure_employee_status_column(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS attendance (
@@ -81,6 +83,29 @@ class AttendanceStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS access_requests (
+                    user_id INTEGER PRIMARY KEY,
+                    requested_name TEXT NOT NULL,
+                    telegram_name TEXT NOT NULL,
+                    username TEXT,
+                    status TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    reviewed_at TEXT
+                )
+                """
+            )
+
+    def ensure_employee_status_column(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(employees)").fetchall()
+        }
+        if "status" not in columns:
+            connection.execute(
+                "ALTER TABLE employees ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"
+            )
 
     def register_employee(self, user_id: int, full_name: str, username: str | None) -> None:
         with self.connect() as connection:
@@ -90,10 +115,131 @@ class AttendanceStore:
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     full_name = excluded.full_name,
-                    username = excluded.username
+                    username = excluded.username,
+                    status = 'approved'
                 """,
                 (user_id, full_name, username, utc_now()),
             )
+
+    def is_approved_employee(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM employees WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return row is not None and row["status"] == "approved"
+
+    def has_pending_request(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM access_requests WHERE user_id = ? AND status = 'pending'",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
+    def create_access_request(
+        self,
+        user_id: int,
+        requested_name: str,
+        telegram_name: str,
+        username: str | None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO access_requests (
+                    user_id, requested_name, telegram_name, username, status, requested_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    requested_name = excluded.requested_name,
+                    telegram_name = excluded.telegram_name,
+                    username = excluded.username,
+                    status = 'pending',
+                    requested_at = excluded.requested_at,
+                    reviewed_at = NULL
+                """,
+                (user_id, requested_name, telegram_name, username, utc_now()),
+            )
+
+    def pending_requests(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT user_id, requested_name, telegram_name, username, requested_at
+                FROM access_requests
+                WHERE status = 'pending'
+                ORDER BY requested_at
+                """
+            ).fetchall()
+
+    def approve_request(self, user_id: int) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            request = connection.execute(
+                """
+                SELECT user_id, requested_name, username
+                FROM access_requests
+                WHERE user_id = ? AND status = 'pending'
+                """,
+                (user_id,),
+            ).fetchone()
+            if request is None:
+                return None
+
+            connection.execute(
+                """
+                INSERT INTO employees (user_id, full_name, username, status, created_at)
+                VALUES (?, ?, ?, 'approved', ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    full_name = excluded.full_name,
+                    username = excluded.username,
+                    status = 'approved'
+                """,
+                (request["user_id"], request["requested_name"], request["username"], utc_now()),
+            )
+            connection.execute(
+                """
+                UPDATE access_requests
+                SET status = 'approved', reviewed_at = ?
+                WHERE user_id = ?
+                """,
+                (utc_now(), user_id),
+            )
+            return request
+
+    def reject_request(self, user_id: int) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            request = connection.execute(
+                """
+                SELECT user_id, requested_name
+                FROM access_requests
+                WHERE user_id = ? AND status = 'pending'
+                """,
+                (user_id,),
+            ).fetchone()
+            if request is None:
+                return None
+
+            connection.execute(
+                """
+                UPDATE access_requests
+                SET status = 'rejected', reviewed_at = ?
+                WHERE user_id = ?
+                """,
+                (utc_now(), user_id),
+            )
+            return request
+
+    def employees(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT user_id, full_name, username, created_at
+                FROM employees
+                WHERE status = 'approved'
+                ORDER BY full_name COLLATE NOCASE
+                """
+            ).fetchall()
 
     def check_in(self, user_id: int, full_name: str, username: str | None) -> AttendanceRecord:
         self.register_employee(user_id, full_name, username)
