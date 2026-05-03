@@ -106,7 +106,8 @@ class AttendanceStore:
                 INSERT INTO attendance (user_id, work_date, check_in)
                 VALUES (?, ?, ?)
                 ON CONFLICT(user_id, work_date) DO UPDATE SET
-                    check_in = COALESCE(attendance.check_in, excluded.check_in)
+                    check_in = excluded.check_in,
+                    check_out = NULL
                 """,
                 (user_id, work_date, now_time),
             )
