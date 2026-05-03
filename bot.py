@@ -85,18 +85,36 @@ def parse_admin_ids() -> set[int]:
 
 
 def can_view_report(user_id: int) -> bool:
-    admin_ids = parse_admin_ids()
-    return not admin_ids or user_id in admin_ids
+    return is_admin(user_id)
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in parse_admin_ids()
+    return user_id in parse_admin_ids() or store.is_db_admin(user_id)
+
+
+def has_any_admin() -> bool:
+    return bool(parse_admin_ids()) or store.has_db_admins()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     del context
     user_id = employee_id(update)
+    if not has_any_admin():
+        store.add_admin(user_id, employee_name(update), employee_username(update))
+        store.register_employee(user_id, employee_name(update), employee_username(update))
+        await update.message.reply_text(
+            "Первый запуск: вы назначены администратором бота.\n\n"
+            "Теперь вы можете одобрять сотрудников:\n"
+            "/requests - заявки\n"
+            "/approve ID - одобрить\n"
+            "/reject ID - отклонить\n"
+            "/admins - список админов",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
     if is_admin(user_id):
+        store.add_admin(user_id, employee_name(update), employee_username(update))
         store.register_employee(user_id, employee_name(update), employee_username(update))
         await update.message.reply_text(
             "Вы зарегистрированы как администратор.\n\n"
@@ -104,7 +122,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/requests - заявки на регистрацию\n"
             "/approve ID - одобрить сотрудника\n"
             "/reject ID - отклонить заявку\n"
-            "/employees - список сотрудников",
+            "/employees - список сотрудников\n"
+            "/admins - список админов\n"
+            "/add_admin ID - добавить админа\n"
+            "/remove_admin ID - удалить админа",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -143,7 +164,7 @@ async def receive_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         username=employee_username(update),
     )
 
-    admin_ids = parse_admin_ids()
+    admin_ids = all_admin_ids()
     if not admin_ids:
         await update.message.reply_text(
             "Заявка сохранена, но администратор пока не настроен. "
@@ -344,6 +365,81 @@ async def employees(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+def all_admin_ids() -> set[int]:
+    ids = set(parse_admin_ids())
+    ids.update(row["user_id"] for row in store.admins())
+    return ids
+
+
+async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    if not is_admin(employee_id(update)):
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    rows = store.admins()
+    env_ids = parse_admin_ids()
+    if not rows and not env_ids:
+        await update.message.reply_text("Администраторы пока не настроены.")
+        return
+
+    lines = ["Администраторы:"]
+    for admin_id in sorted(env_ids):
+        lines.append(f"- {admin_id} (из ADMIN_IDS)")
+    for row in rows:
+        username = f" (@{row['username']})" if row["username"] else ""
+        lines.append(f"- {row['full_name']}{username} - {row['user_id']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(employee_id(update)):
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Использование: /add_admin TELEGRAM_ID")
+        return
+
+    new_admin_id = int(context.args[0])
+    store.add_admin(new_admin_id, f"Admin {new_admin_id}", None)
+    await update.message.reply_text(
+        f"Админ добавлен: {new_admin_id}\n"
+        "Когда он напишет /start, имя обновится автоматически."
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=new_admin_id,
+            text="Вас назначили администратором бота. Нажмите /start.",
+        )
+    except Exception as exc:
+        logger.warning("Could not notify new admin %s: %s", new_admin_id, exc)
+
+
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(employee_id(update)):
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Использование: /remove_admin TELEGRAM_ID")
+        return
+
+    target_id = int(context.args[0])
+    if target_id == employee_id(update) and len(all_admin_ids()) <= 1:
+        await update.message.reply_text("Нельзя удалить единственного администратора.")
+        return
+
+    if target_id in parse_admin_ids():
+        await update.message.reply_text(
+            "Этот админ задан через ADMIN_IDS. Удалите его в настройках Choreo."
+        )
+        return
+
+    removed = store.remove_admin(target_id)
+    await update.message.reply_text("Админ удален." if removed else "Админ с таким ID не найден.")
+
+
 async def today_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if not can_view_report(employee_id(update)):
@@ -500,6 +596,9 @@ def main() -> None:
     application.add_handler(CommandHandler("approve", approve))
     application.add_handler(CommandHandler("reject", reject))
     application.add_handler(CommandHandler("employees", employees))
+    application.add_handler(CommandHandler("admins", admins))
+    application.add_handler(CommandHandler("add_admin", add_admin))
+    application.add_handler(CommandHandler("remove_admin", remove_admin))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Attendance bot is running")

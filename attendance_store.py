@@ -96,6 +96,16 @@ class AttendanceStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id INTEGER PRIMARY KEY,
+                    full_name TEXT NOT NULL,
+                    username TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
     def ensure_employee_status_column(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -237,6 +247,47 @@ class AttendanceStore:
                 SELECT user_id, full_name, username, created_at
                 FROM employees
                 WHERE status = 'approved'
+                ORDER BY full_name COLLATE NOCASE
+                """
+            ).fetchall()
+
+    def add_admin(self, user_id: int, full_name: str, username: str | None) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO admins (user_id, full_name, username, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    full_name = excluded.full_name,
+                    username = excluded.username
+                """,
+                (user_id, full_name, username, utc_now()),
+            )
+
+    def remove_admin(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+            return cursor.rowcount > 0
+
+    def is_db_admin(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM admins WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
+    def has_db_admins(self) -> bool:
+        with self.connect() as connection:
+            row = connection.execute("SELECT 1 FROM admins LIMIT 1").fetchone()
+        return row is not None
+
+    def admins(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT user_id, full_name, username, created_at
+                FROM admins
                 ORDER BY full_name COLLATE NOCASE
                 """
             ).fetchall()
