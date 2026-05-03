@@ -124,7 +124,7 @@ class AttendanceStore:
                 INSERT INTO employees (user_id, full_name, username, created_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    full_name = excluded.full_name,
+                    full_name = employees.full_name,
                     username = excluded.username,
                     status = 'approved'
                 """,
@@ -247,6 +247,7 @@ class AttendanceStore:
                 SELECT user_id, full_name, username, created_at
                 FROM employees
                 WHERE status = 'approved'
+                    AND user_id NOT IN (SELECT user_id FROM admins)
                 ORDER BY full_name COLLATE NOCASE
                 """
             ).fetchall()
@@ -378,6 +379,8 @@ class AttendanceStore:
                 LEFT JOIN attendance
                     ON employees.user_id = attendance.user_id
                     AND attendance.work_date = ?
+                WHERE employees.status = 'approved'
+                    AND employees.user_id NOT IN (SELECT user_id FROM admins)
                 ORDER BY employees.full_name COLLATE NOCASE
                 """,
                 (requested_date, requested_date),

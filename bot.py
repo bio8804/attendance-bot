@@ -40,12 +40,24 @@ BUTTON_OUT = "Ушел"
 BUTTON_STATUS = "Мой статус"
 BUTTON_TODAY = "Отчет за сегодня"
 BUTTON_INSIDE = "Кто на работе"
+BUTTON_EXPORT = "Excel отчет"
+BUTTON_REQUESTS = "Заявки"
+BUTTON_EMPLOYEES = "Сотрудники"
+BUTTON_ADMINS = "Админы"
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
+EMPLOYEE_KEYBOARD = ReplyKeyboardMarkup(
     [
         [BUTTON_IN, BUTTON_OUT],
-        [BUTTON_STATUS, BUTTON_TODAY],
-        [BUTTON_INSIDE],
+        [BUTTON_STATUS],
+    ],
+    resize_keyboard=True,
+)
+
+ADMIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [BUTTON_REQUESTS, BUTTON_EMPLOYEES],
+        [BUTTON_INSIDE, BUTTON_TODAY],
+        [BUTTON_EXPORT, BUTTON_ADMINS],
     ],
     resize_keyboard=True,
 )
@@ -97,12 +109,15 @@ def has_any_admin() -> bool:
     return bool(parse_admin_ids()) or store.has_db_admins()
 
 
+def role_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    return ADMIN_KEYBOARD if is_admin(user_id) else EMPLOYEE_KEYBOARD
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     del context
     user_id = employee_id(update)
     if not has_any_admin():
         store.add_admin(user_id, employee_name(update), employee_username(update))
-        store.register_employee(user_id, employee_name(update), employee_username(update))
         await update.message.reply_text(
             "Первый запуск: вы назначены администратором бота.\n\n"
             "Теперь вы можете одобрять сотрудников:\n"
@@ -110,13 +125,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/approve ID - одобрить\n"
             "/reject ID - отклонить\n"
             "/admins - список админов",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=ADMIN_KEYBOARD,
         )
         return ConversationHandler.END
 
     if is_admin(user_id):
         store.add_admin(user_id, employee_name(update), employee_username(update))
-        store.register_employee(user_id, employee_name(update), employee_username(update))
         await update.message.reply_text(
             "Вы зарегистрированы как администратор.\n\n"
             "Команды администратора:\n"
@@ -127,14 +141,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/admins - список админов\n"
             "/add_admin ID - добавить админа\n"
             "/remove_admin ID - удалить админа",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=ADMIN_KEYBOARD,
         )
         return ConversationHandler.END
 
     if store.is_approved_employee(user_id):
         await update.message.reply_text(
             "Вы уже зарегистрированы. Можно пользоваться ботом.",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=EMPLOYEE_KEYBOARD,
         )
         return ConversationHandler.END
 
@@ -207,8 +221,11 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def ensure_approved(update: Update) -> bool:
     if is_admin(employee_id(update)):
-        store.register_employee(employee_id(update), employee_name(update), employee_username(update))
-        return True
+        await update.message.reply_text(
+            "Администратор не участвует в учете прихода и ухода.",
+            reply_markup=ADMIN_KEYBOARD,
+        )
+        return False
 
     if store.is_approved_employee(employee_id(update)):
         return True
@@ -231,11 +248,11 @@ async def check_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if record.check_in:
         await update.message.reply_text(
             f"Приход отмечен: {record.check_in}\nДата: {record.work_date}",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=EMPLOYEE_KEYBOARD,
         )
         return
 
-    await update.message.reply_text("Не удалось отметить приход.", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("Не удалось отметить приход.", reply_markup=EMPLOYEE_KEYBOARD)
 
 
 async def check_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -249,7 +266,7 @@ async def check_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Уход отмечен: {record.check_out}\n"
         f"Дата: {record.work_date}\n"
         f"Отработано: {format_minutes(record.worked_minutes)}",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=EMPLOYEE_KEYBOARD,
     )
 
 
@@ -262,7 +279,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.register_employee(user_id, employee_name(update), employee_username(update))
     record = store.get_record(user_id)
 
-    await update.message.reply_text(format_record_status(record), reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(format_record_status(record), reply_markup=EMPLOYEE_KEYBOARD)
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -279,7 +296,7 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
     records = store.daily_report(report_date)
-    await update.message.reply_text(format_report(report_date, records), reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(format_report(report_date, records), reply_markup=ADMIN_KEYBOARD)
 
 
 async def requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -323,7 +340,7 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(
         chat_id=approved_user_id,
         text="Ваша заявка одобрена. Теперь можно отмечать приход и уход.",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=EMPLOYEE_KEYBOARD,
     )
 
 
@@ -372,7 +389,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await context.bot.send_message(
             chat_id=target_user_id,
             text="Ваша заявка одобрена. Теперь можно отмечать приход и уход.",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=EMPLOYEE_KEYBOARD,
         )
         await query.answer("Сотрудник одобрен.")
         return
@@ -498,26 +515,26 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def today_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if not can_view_report(employee_id(update)):
-        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=MAIN_KEYBOARD)
+        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=role_keyboard(employee_id(update)))
         return
 
-    await update.message.reply_text(format_report(today(), store.daily_report()), reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(format_report(today(), store.daily_report()), reply_markup=ADMIN_KEYBOARD)
 
 
 async def inside(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if not can_view_report(employee_id(update)):
-        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=MAIN_KEYBOARD)
+        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=role_keyboard(employee_id(update)))
         return
 
     records = [record for record in store.daily_report() if record.is_inside]
-    await update.message.reply_text(format_inside(records), reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(format_inside(records), reply_markup=ADMIN_KEYBOARD)
 
 
 async def export_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = employee_id(update)
     if not can_view_report(user_id):
-        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=MAIN_KEYBOARD)
+        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=role_keyboard(employee_id(update)))
         return
 
     report_date = today()
@@ -536,7 +553,7 @@ async def export_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 document=document,
                 filename=file_path.name,
                 caption=f"Excel-отчет за {report_date}",
-                reply_markup=MAIN_KEYBOARD,
+                reply_markup=ADMIN_KEYBOARD,
             )
 
 
@@ -557,10 +574,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text == BUTTON_INSIDE:
         await inside(update, context)
         return
+    if text == BUTTON_EXPORT:
+        await export_report(update, context)
+        return
+    if text == BUTTON_REQUESTS:
+        await requests(update, context)
+        return
+    if text == BUTTON_EMPLOYEES:
+        await employees(update, context)
+        return
+    if text == BUTTON_ADMINS:
+        await admins(update, context)
+        return
 
     await update.message.reply_text(
-        "Я понимаю кнопки и команды: /in, /out, /status, /today, /inside, /report, /export.",
-        reply_markup=MAIN_KEYBOARD,
+        "Я понимаю кнопки и команды меню. Также доступны /start и /myid.",
+        reply_markup=role_keyboard(employee_id(update)),
     )
 
 
