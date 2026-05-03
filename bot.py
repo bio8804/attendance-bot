@@ -12,6 +12,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from attendance_store import AttendanceRecord, AttendanceStore, format_minutes, is_valid_date, today
 from health_server import start_health_server
+from report_exporter import export_daily_report
 
 
 logging.basicConfig(
@@ -90,6 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/status - текущий статус\n"
         "/today - отчет за сегодня\n"
         "/inside - кто сейчас на работе\n"
+        "/export - Excel-отчет за сегодня\n"
         "/report YYYY-MM-DD - отчет за дату",
         reply_markup=MAIN_KEYBOARD,
     )
@@ -166,6 +168,32 @@ async def inside(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(format_inside(records), reply_markup=MAIN_KEYBOARD)
 
 
+async def export_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = employee_id(update)
+    if not can_view_report(user_id):
+        await update.message.reply_text("У вас нет доступа к отчетам.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    report_date = today()
+    if context.args:
+        report_date = context.args[0]
+        if not is_valid_date(report_date):
+            await update.message.reply_text("Дата должна быть в формате YYYY-MM-DD, например 2026-05-03.")
+            return
+
+    records = store.daily_report(report_date)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_path = Path(temp_dir) / f"attendance_{report_date}.xlsx"
+        export_daily_report(file_path, report_date, records)
+        with file_path.open("rb") as document:
+            await update.message.reply_document(
+                document=document,
+                filename=file_path.name,
+                caption=f"Excel-отчет за {report_date}",
+                reply_markup=MAIN_KEYBOARD,
+            )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     if text == BUTTON_IN:
@@ -185,7 +213,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await update.message.reply_text(
-        "Я понимаю кнопки и команды: /in, /out, /status, /today, /inside, /report.",
+        "Я понимаю кнопки и команды: /in, /out, /status, /today, /inside, /report, /export.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -261,6 +289,7 @@ def main() -> None:
     application.add_handler(CommandHandler("today", today_report))
     application.add_handler(CommandHandler("inside", inside))
     application.add_handler(CommandHandler("report", report))
+    application.add_handler(CommandHandler("export", export_report))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Attendance bot is running")
